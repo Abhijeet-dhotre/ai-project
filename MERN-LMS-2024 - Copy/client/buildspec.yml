@@ -1,0 +1,26 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo Installing NPM dependencies...
+      - npm install
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - npm run build
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      # Upload build output to S3 bucket
+      - aws s3 sync ./dist/ s3://lms-client-frontend --delete
+      # Invalidate CloudFront cache for instant deployment
+      - aws cloudfront create-invalidation --distribution-id EI0RTK0OFNL21 --paths "/*"
+
+artifacts:
+  files:
+    - '**/*'
+  base-directory: 'dist'
