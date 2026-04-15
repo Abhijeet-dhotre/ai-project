@@ -11,8 +11,10 @@ import { twMerge } from "tailwind-merge";
 import { cva } from "class-variance-authority";
 
 // --- START: Environment Variables (from .env)
-const VITE_SUPABASE_URL = "https://uqqsljrhbzibfzlbnhxd.supabase.co";
-const VITE_SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxcXNsanJoYnppYmZ6bGJuaHhkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1MzAyMTksImV4cCI6MjA3NzEwNjIxOX0.dokef5388oTDv9pYKJJw_MjK8Txd8_jhpnJJ1hrd6OQ";
+const VITE_SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://xvokpkrvinwfewneiyxf.supabase.co";
+const VITE_SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh2b2twa3J2aW53ZmV3bmVpeXhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MzYxMjUsImV4cCI6MjA5MTQxMjEyNX0.WDzsjqh6ufB_3YVTfibg_5b12z56YEaUJzIDsvxvT3k";
+const VITE_GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyBr7BoLKNwAXHMxZU-i6yWoiP5Xy15PnNk";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${VITE_GEMINI_API_KEY}`;
 // --- END: Environment Variables
 
 // --- START: UTILITIES ---
@@ -371,38 +373,51 @@ const MindMapView: React.FC<MindMapViewProps> = ({
     }
     setIsLoading(true);
     setMindMapData(null);
-    const maxRetries = 3;
-    let lastError: Error | null = null;
     try {
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                const response = await fetch(`${VITE_SUPABASE_URL}/functions/v1/generate-mindmap`, { 
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${VITE_SUPABASE_PUBLISHABLE_KEY}`, 
-                    },
-                    body: JSON.stringify({ content: inputPrompt }),
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    setMindMapData(data.mindMap as MindMapData);
-                    toast.success(`Mind map "${data.mindMap.title}" created successfully!`);
-                    return;
-                } else {
-                    lastError = new Error(`HTTP error! status: ${response.status}`);
-                }
-            } catch (error) {
-                lastError = error as Error;
-            }
-            if (attempt < maxRetries - 1) {
-                const delay = Math.pow(2, attempt) * 1000;
-                console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay / 1000}s...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
+      const systemPrompt = `You are a study aid assistant. Create a mind map from the provided content. 
+Respond with ONLY valid JSON in this exact format:
+{
+  "title": "Main Topic",
+  "branches": [
+    {"label": "Branch 1", "notes": "Description", "subBranches": ["sub point 1", "sub point 2"]},
+    {"label": "Branch 2", "notes": "Description", "subBranches": ["sub point 1"]}
+  ]
+}
+Use 3-5 main branches covering key concepts. Each branch should have a brief note and 2-4 sub-points.`;
+
+      const payload = {
+        contents: [{ parts: [{ text: inputPrompt }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.7,
+          responseMimeType: "application/json"
         }
-        console.error('Error generating mind map after multiple retries:', lastError);
-        toast.error('Failed to generate mind map. Please try again.');
+      };
+
+      const response = await fetch(GEMINI_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (text) {
+        const cleaned = text.replace(/```json\s*([\s\S]*?)\s*```/, '$1').trim();
+        const data = JSON.parse(cleaned);
+        setMindMapData(data as MindMapData);
+        toast.success(`Mind map "${data.title}" created successfully!`);
+      } else {
+        throw new Error("Invalid response from AI");
+      }
+    } catch (error) {
+      console.error('Error generating mind map:', error);
+      toast.error('Failed to generate mind map. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -469,38 +484,46 @@ const MnemonicView: React.FC<MnemonicViewProps> = ({ inputPrompt, isLoading, set
     setIsLoading(true);
     setIsGenerating(true);
     setMnemonicResult('');
-    const maxRetries = 3;
-    let lastError: Error | null = null;
     try {
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                const response = await fetch(`${VITE_SUPABASE_URL}/functions/v1/generate-mnemonic`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${VITE_SUPABASE_PUBLISHABLE_KEY}`,
-                    },
-                    body: JSON.stringify({ content: inputPrompt }),
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    setMnemonicResult(data.mnemonic);
-                    toast.success('Mnemonics created successfully! Time to memorize.');
-                    return;
-                } else {
-                    lastError = new Error(`HTTP error! status: ${response.status}`);
-                }
-            } catch (error) {
-                lastError = error as Error;
-            }
-            if (attempt < maxRetries - 1) {
-                const delay = Math.pow(2, attempt) * 1000;
-                console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay / 1000}s...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
+      const systemPrompt = `You are a creative study aid assistant. Create memorable mnemonics for the provided facts/concepts.
+Use markdown formatting with:
+- ## for main sections
+- ### for each concept
+- **bold** for key terms
+- Make creative acronyms, phrases, or memory hooks
+- Be concise but creative`;
+
+      const payload = {
+        contents: [{ parts: [{ text: inputPrompt }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.9,
+          responseMimeType: "text/plain"
         }
-        console.error('Error generating mnemonic after multiple retries:', lastError);
-        toast.error('Failed to generate mnemonics. Please try again.');
+      };
+
+      const response = await fetch(GEMINI_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (text) {
+        setMnemonicResult(text);
+        toast.success('Mnemonics created successfully! Time to memorize.');
+      } else {
+        throw new Error("Invalid response from AI");
+      }
+    } catch (error) {
+      console.error('Error generating mnemonics:', error);
+      toast.error('Failed to generate mnemonics. Please try again.');
     } finally {
       setIsLoading(false);
       setIsGenerating(false);
@@ -591,39 +614,42 @@ const VoiceNotesView: React.FC<VoiceNotesViewProps> = ({ inputPrompt, isLoading,
     setIsGenerating(true);
     setTeachingScript('');
     handleStop(); 
-    const maxRetries = 3;
-    let lastError: Error | null = null;
     try {
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                const response = await fetch(`${VITE_SUPABASE_URL}/functions/v1/generate-teaching-script`, { 
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${VITE_SUPABASE_PUBLISHABLE_KEY}`, 
-                    },
-                    body: JSON.stringify({ content: inputPrompt }),
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    const script = data.teachingScript;
-                    setTeachingScript(script.replace(/\\n/g, '\n').trim()); 
-                    toast.success('Teaching script generated! Click "Start Listening" to hear it.');
-                    return;
-                } else {
-                    lastError = new Error(`HTTP error! status: ${response.status}`);
-                }
-            } catch (error) {
-                lastError = error as Error;
-            }
-            if (attempt < maxRetries - 1) {
-                const delay = Math.pow(2, attempt) * 1000;
-                console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay / 1000}s...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
+      const systemPrompt = `You are a tutor. Create a teaching script from the provided study material.
+Make it conversational and easy to understand. Use simple language.
+Structure it as a progressive lesson.`;
+
+      const payload = {
+        contents: [{ parts: [{ text: inputPrompt }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.7,
+          responseMimeType: "text/plain"
         }
-        console.error('Error generating teaching script after multiple retries:', lastError);
-        toast.error('Failed to generate teaching script. Please try again.');
+      };
+
+      const response = await fetch(GEMINI_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (text) {
+        setTeachingScript(text.replace(/\\n/g, '\n').trim());
+        toast.success('Teaching script generated! Click "Start Listening" to hear it.');
+      } else {
+        throw new Error("Invalid response from AI");
+      }
+    } catch (error) {
+      console.error('Error generating teaching script:', error);
+      toast.error('Failed to generate teaching script. Please try again.');
     } finally {
       setIsLoading(false);
       setIsGenerating(false);

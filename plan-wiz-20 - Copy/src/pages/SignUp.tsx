@@ -4,9 +4,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { useAuth } from "../App";
 
 const SignUp = () => {
   const navigate = useNavigate();
+  const { login } = useAuth();
   const [isLoading, setIsLoading] = useState(false);
   const [formData, setFormData] = useState({
     fullName: "",
@@ -43,25 +45,25 @@ const SignUp = () => {
     setIsLoading(true);
 
     try {
-      // Save user to localStorage
-      const users = JSON.parse(localStorage.getItem("users") || "[]");
-      const existingUser = users.find((u: any) => u.email === formData.email);
+      const response = await fetch("http://localhost:5000/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fullName: formData.fullName,
+          email: formData.email,
+          password: formData.password,
+        }),
+      });
 
-      if (existingUser) {
-        throw new Error("Email already registered");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to create account");
       }
 
-      const newUser = {
-        id: Date.now().toString(),
-        fullName: formData.fullName,
-        email: formData.email,
-        password: formData.password,
-      };
-
-      users.push(newUser);
-      localStorage.setItem("users", JSON.stringify(users));
-      localStorage.setItem("currentUser", JSON.stringify(newUser));
-
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("currentUser", JSON.stringify(data.user));
+      login(data.user);
       toast.success("Account created successfully!");
       navigate("/dashboard");
     } catch (error: any) {

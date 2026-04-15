@@ -1,6 +1,6 @@
 // src/pages/ImageGenerator.tsx
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom"; // Removed useParams
+import { useNavigate } from "react-router-dom";
 import {
     Card,
     CardContent,
@@ -24,15 +24,13 @@ import {
 import { cn } from "@/lib/utils";
 
 const ImageGenerator = () => {
-    // const { planId } = useParams(); // Removed
     const navigate = useNavigate();
     const [theory, setTheory] = useState("");
     const [imageUrl, setImageUrl] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
 
-    // --- Supabase Function URL ---
-    const supabaseUrl = 'https://ylfyiojbhzdknnhinqfe.supabase.co'; //
-    const functionUrl = `${supabaseUrl}/functions/v1/generate-study-image`;
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKey}`;
 
     // --- Message Logic ---
     const showMessage = (text: string, type: 'success' | 'error' | 'info' | 'warning' = 'success') => {
@@ -51,29 +49,52 @@ const ImageGenerator = () => {
         if (!trimmedTheory) { showMessage("Please enter theory", 'error'); return; }
         setIsLoading(true); setImageUrl(null);
         try {
-            let attempts = 0; const maxAttempts = 5; const initialDelay = 1000;
-            const fetchWithRetry = async (): Promise<any> => {
-                 try {
-                  const response = await fetch(functionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', /* Add Auth if needed */ }, body: JSON.stringify({ theory: trimmedTheory }) });
-                  if (!response.ok) { /* ... error handling ... */
-                    if (response.status === 402) throw new Error('AI credits depleted.');
-                    let errorData: { error?: string } = {}; try { errorData = await response.json(); } catch (e) { /* ignore */ }
-                    if (response.status === 400) throw new Error(errorData.error || `Bad Request: ${response.statusText}`);
-                    if (response.status === 429) throw new Error('Rate limit exceeded. Try again later.');
-                    throw new Error(errorData.error || `HTTP error! Status: ${response.status}`);
-                  } return await response.json();
-                } catch (error: any) { /* ... retry logic ... */
-                  attempts++; const isRetryable = error.message?.includes('Rate limit') || error instanceof TypeError || (error.message?.includes('HTTP error') && parseInt(error.message.split('Status: ')[1] || '0') >= 500);
-                  if (attempts >= maxAttempts || !isRetryable) throw error;
-                  const delay = initialDelay * Math.pow(2, attempts - 1) + Math.random() * 1000; console.warn(`Request failed (${error.message}). Retrying attempt ${attempts} in ${Math.round(delay/1000)}s...`);
-                  await new Promise(resolve => setTimeout(resolve, delay)); return fetchWithRetry();
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{
+                        parts: [{
+                            text: `Generate a detailed, high-quality educational image: ${trimmedTheory}. Make it clear, informative and visually appealing for study purposes.`
+                        }]
+                    }]
+                }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error?.message || `API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            
+            const imageData = data.candidates?.[0]?.content?.parts?.find((part: any) => part.inlineData?.data);
+            const textResponse = data.candidates?.[0]?.content?.parts?.find((part: any) => part.text)?.text;
+            
+            let generatedImageUrl = imageData?.inlineData?.data 
+                ? `data:${imageData.inlineData.mimeType};base64,${imageData.inlineData.data}`
+                : null;
+
+            if (!generatedImageUrl && textResponse?.includes('http')) {
+                const urlMatch = textResponse.match(/https?:\/\/[^\s]+/);
+                if (urlMatch) {
+                    generatedImageUrl = urlMatch[0];
                 }
-            };
-            const data = await fetchWithRetry();
-            if (data.image && typeof data.image === 'string') { setImageUrl(data.image); showMessage("Visual generated!", 'success'); }
-            else { throw new Error(data.error || 'Invalid response received.'); }
-        } catch (error: any) { console.error('Error generating image:', error); showMessage(error.message || "Failed to generate visual.", 'error'); setImageUrl(null); }
-        finally { setIsLoading(false); }
+            }
+
+            if (!generatedImageUrl) {
+                throw new Error("No image was generated. Try a different prompt.");
+            }
+
+            setImageUrl(generatedImageUrl);
+            showMessage("Visual generated!", 'success');
+        } catch (error: any) {
+            console.error('Error generating image:', error);
+            showMessage(error.message || "Failed to generate visual.", 'error');
+            setImageUrl(null);
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     // --- Download Logic ---

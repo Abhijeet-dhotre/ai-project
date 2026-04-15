@@ -25,6 +25,16 @@ interface EvaluationResult {
   justification: string;
 }
 
+class QuotaExceededError extends Error {
+    retryAfterSeconds?: number;
+
+    constructor(message: string, retryAfterSeconds?: number) {
+        super(message);
+        this.name = "QuotaExceededError";
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+}
+
 // --- PDF Worker Setup ---
 import PdfjsWorker from 'pdfjs-dist/build/pdf.worker?url';
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfjsWorker;
@@ -75,7 +85,55 @@ const SubjectivePage = () => {
 
     // --- API Config ---
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+    const genModel = "gemini-2.5-flash";
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${genModel}:generateContent?key=${apiKey}`;
+
+        const generateFallbackQuestions = (material: string, marks: number): GeneratedQuestion[] => {
+                const cleaned = material.replace(/\s+/g, ' ').trim();
+                if (!cleaned) return [];
+
+                const lines = cleaned
+                    .split(/[.!?]\s+/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 35);
+
+                const unique = Array.from(new Set(lines)).slice(0, 10);
+                const picked = unique.slice(0, 5);
+
+                return picked.map((segment, idx) => ({
+                    question: `Q${idx + 1}. Explain the significance of: ${segment.slice(0, 120)}${segment.length > 120 ? '...' : ''}`,
+                    marks,
+                    type: idx % 2 === 0 ? 'concept' : 'faq',
+                }));
+        };
+
+        const evaluateFallbackAnswers = (questions: GeneratedQuestion[], answers: string[]): EvaluationResult[] => {
+                return questions.map((q, i) => {
+                    const answer = answers[i] || '';
+                    const answerWords = answer.trim().split(/\s+/).filter(Boolean).length;
+                    const keyWords = q.question.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 4);
+                    const overlap = keyWords.filter(k => answer.toLowerCase().includes(k)).length;
+                    const ratingBase = Math.min(10, Math.max(1, Math.round((answerWords / 20) * 4 + overlap)));
+                    const rating = answerWords === 0 ? 1 : ratingBase;
+
+                    let feedback = "Your answer is brief. Add definitions, explanation, and one example to improve scoring.";
+                    if (rating >= 8) {
+                        feedback = "Good coverage with relevant points. Improve further by structuring answer with headings and a concise conclusion.";
+                    } else if (rating >= 5) {
+                        feedback = "Decent attempt. Add more depth, key terminology, and one practical/example-based explanation.";
+                    }
+
+                    return {
+                        question: q.question,
+                        answer,
+                        feedback,
+                        rating,
+                        justification: answerWords === 0
+                            ? "No answer provided."
+                            : `Length and keyword relevance suggest a ${rating}/10 level response.`,
+                    };
+                });
+        };
 
     // --- Load Plan (Removed) ---
     // useEffect(() => { ... }, [planId, navigate]); // Removed
@@ -83,7 +141,7 @@ const SubjectivePage = () => {
     // --- Helpers ---
     async function getTextFromPdf(file: File): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = async (e) => { if (!e.target?.result) { return reject(new Error("Failed to read file.")); } try { const data = new Uint8Array(e.target.result as ArrayBuffer); const pdf = await pdfjsLib.getDocument({ data }).promise; let fullText = ''; for (let i = 1; i <= pdf.numPages; i++) { const page = await pdf.getPage(i); const textContent = await page.getTextContent(); fullText += textContent.items.map(item => (item as any).str).join(' ') + '\n'; } resolve(fullText); } catch (error) { console.error("Error parsing PDF:", error); reject(new Error("Could not read the PDF.")); } }; reader.onerror = () => reject(new Error("Failed to read the file.")); reader.readAsArrayBuffer(file); }); }
     function cleanJsonResponse(text: string): string { const firstBracket = text.indexOf('{'); const lastBracket = text.lastIndexOf('}'); if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) { return text.substring(firstBracket, lastBracket + 1); } const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/); if (jsonMatch && jsonMatch[1]) { return jsonMatch[1].trim(); } return text.trim(); }
-    async function callGemini(prompt: string, systemInstruction: string): Promise<string> { const payload = { contents: [{ parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: systemInstruction }] }, generationConfig: { responseMimeType: "application/json" } }; try { const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (!response.ok) { let errorBody; try { errorBody = await response.json(); } catch (e) { errorBody = { error: { message: `HTTP Error: ${response.status} ${response.statusText}` } }; } console.error("API Error Response:", errorBody); throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorBody.error?.message || 'Unknown error'}`); } const result = await response.json(); console.log("API Raw Response:", result); const candidate = result.candidates?.[0]; const text = candidate?.content?.parts?.[0]?.text; if (text) { return text; } else { console.error("Invalid response structure:", result); if (candidate && typeof candidate === 'string') return candidate; if (result && typeof result === 'string') return result; throw new Error("Invalid response structure from API."); } } catch (error) { console.error("Gemini API call failed:", error); throw error; } }
+    async function callGemini(prompt: string, systemInstruction: string): Promise<string> { const payload = { contents: [{ parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: systemInstruction }] }, generationConfig: { responseMimeType: "application/json" } }; try { const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (!response.ok) { let errorBody; try { errorBody = await response.json(); } catch (e) { errorBody = { error: { message: `HTTP Error: ${response.status} ${response.statusText}` } }; } console.error("API Error Response:", errorBody); if (response.status === 429) { const retryDetail = errorBody?.error?.details?.find((detail: any) => detail?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo"); const rawDelay = retryDetail?.retryDelay as string | undefined; const retryAfterSeconds = rawDelay ? parseInt(rawDelay.replace("s", ""), 10) : undefined; throw new QuotaExceededError("Gemini API quota exceeded.", retryAfterSeconds); } const err: any = new Error(`API Error: ${response.status} ${response.statusText} - ${errorBody.error?.message || 'Unknown error'}`); err.status = response.status; throw err; } const result = await response.json(); console.log("API Raw Response:", result); const candidate = result.candidates?.[0]; const text = candidate?.content?.parts?.[0]?.text; if (text) { return text; } else { console.error("Invalid response structure:", result); if (candidate && typeof candidate === 'string') return candidate; if (result && typeof result === 'string') return result; throw new Error("Invalid response structure from API."); } } catch (error) { console.error("Gemini API call failed:", error); throw error; } }
     function showLoader(text: string) { setLoaderText(text); setIsLoading(true); }
     function hideLoader() { setIsLoading(false); }
     function showError(message: string) { setErrorMessage(message || "An unknown error occurred."); setShowErrorModal(true); toast.error(message || "An unknown error occurred."); }
@@ -106,8 +164,24 @@ const SubjectivePage = () => {
         const historyContext = isMoreQuestionsRequest && askedQuestionsHistory.length > 0 ? `\n\nAVOID questions similar to:\n${askedQuestionsHistory.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n` : '';
         const prompt = `Analyze the study material. Identify FAQs, key equations/formulas, and core concepts.\nStudy Material:\n---\n${materialToUse}\n---\nGenerate exactly 5 distinct subjective questions focusing on these areas. Prioritize FAQs and equations. Ensure questions require critical thinking, suit ${subjectiveMarks} marks, are clear, and differ from previous ones.${historyContext}\nOutput ONLY a valid JSON object: \`\`\`json\n{ "questions": [ { "question": "...", "marks": ${subjectiveMarks}, "type": "faq|equation|concept" }, ... ] }\`\`\` No text outside JSON.`;
 
-        try {
-            const responseText = await callGemini(prompt, systemInstruction);
+                try {
+                        let responseText = "";
+                        if (apiKey) {
+                            responseText = await callGemini(prompt, systemInstruction);
+                        } else {
+                            const fallback = generateFallbackQuestions(materialToUse, subjectiveMarks);
+                            if (fallback.length === 0) {
+                                throw new Error("Offline question generation failed for this material.");
+                            }
+                            setAskedQuestionsHistory(prev => [...prev, ...fallback.map(q => q.question)]);
+                            setGeneratedQuestions(fallback);
+                            setUserAnswers(new Array(fallback.length).fill(''));
+                            setCurrentQuestionIndex(0);
+                            hideLoader();
+                            switchSection('test');
+                            toast.warning("API key missing. Generated offline subjective questions.");
+                            return;
+                        }
             let cleanedText = responseText.trim(); if (cleanedText.startsWith("```json")) { cleanedText = cleanedText.substring(7); } if (cleanedText.endsWith("```")) { cleanedText = cleanedText.substring(0, cleanedText.length - 3); } cleanedText = cleanJsonResponse(cleanedText);
             const responseJson = JSON.parse(cleanedText);
             if (!responseJson.questions?.length || typeof responseJson.questions[0]?.question !== 'string') { throw new Error("AI returned invalid question format."); }
@@ -116,7 +190,30 @@ const SubjectivePage = () => {
             responseJson.questions.slice(0, 5).forEach((q: any) => { if (q.question) { newQuestions.push({ question: q.question, marks: subjectiveMarks, type: q.type }); newHistoryEntries.push(q.question); } });
             if (newQuestions.length === 0) { throw new Error("No valid questions found."); }
             setAskedQuestionsHistory(prev => [...prev, ...newHistoryEntries]); setGeneratedQuestions(newQuestions); setUserAnswers(new Array(newQuestions.length).fill('')); setCurrentQuestionIndex(0); switchSection('test');
-        } catch (error: any) { console.error("Error generating questions:", error); if (error instanceof SyntaxError) { showError(`Invalid AI response format. Check console.`); } else { showError(`Failed to generate questions: ${error.message}.`); } }
+                } catch (error: any) {
+                        console.error("Error generating questions:", error);
+                        if (error instanceof QuotaExceededError || error?.status === 429) {
+                            const fallback = generateFallbackQuestions(materialToUse, subjectiveMarks);
+                            if (fallback.length > 0) {
+                                setAskedQuestionsHistory(prev => [...prev, ...fallback.map(q => q.question)]);
+                                setGeneratedQuestions(fallback);
+                                setUserAnswers(new Array(fallback.length).fill(''));
+                                setCurrentQuestionIndex(0);
+                                switchSection('test');
+                                showError(
+                                    error instanceof QuotaExceededError && error.retryAfterSeconds
+                                        ? `API quota exceeded. Offline questions generated. Try AI again in about ${error.retryAfterSeconds}s.`
+                                        : "API quota exceeded. Offline questions generated."
+                                );
+                            } else {
+                                showError("API quota exceeded and offline question generation failed.");
+                            }
+                        } else if (error instanceof SyntaxError) {
+                            showError(`Invalid AI response format. Check console.`);
+                        } else {
+                            showError(`Failed to generate questions: ${error.message}.`);
+                        }
+                }
         finally { hideLoader(); }
     }
 
@@ -146,12 +243,33 @@ const SubjectivePage = () => {
         const systemInstruction = `You are an expert educator evaluating subjective answers. Provide constructive feedback based STRICTLY on the original study material. Be encouraging but accurate. Your response MUST be valid JSON.`;
         const prompt = ` Please evaluate the student's answers based ONLY on the Original Study Material provided below. Consider each question's specified marks when assessing depth. Original Study Material:\n---\n${subjectMaterial}\n---\nQuestions, Marks, and Student's Answers:\n---\n${JSON.stringify(answersWithQuestions)}\n---\nFor EACH question, provide:\n1. Detailed feedback: Strengths/weaknesses based ONLY on the study material. Suggestions for improvement. **Ensure quotes (") and special characters are JSON escaped (\\").**\n2. Numerical rating (1-10).\n3. Brief justification: One sentence explaining the rating. **Ensure quotes (") and special characters are JSON escaped (\\").**\n\nFormat response STRICTLY as a valid JSON object:\n\`\`\`json\n{"evaluation": [{"question": "...", "answer": "...", "feedback": "...", "rating": number, "justification": "..."}, ...]}\n\`\`\`\n**Crucially important: Ensure ALL string values are valid JSON strings.** Do NOT include text outside the JSON structure. `; 
         
-        try { 
-            const responseText = await callGemini(prompt, systemInstruction); 
+                try { 
+                        if (!apiKey) {
+                            const fallbackEvaluation = evaluateFallbackAnswers(generatedQuestions, userAnswers);
+                            setEvaluationResults(fallbackEvaluation);
+                            hideLoader();
+                            switchSection('results');
+                            toast.warning("API key missing. Used offline answer evaluation.");
+                            return;
+                        }
+
+                        const responseText = await callGemini(prompt, systemInstruction); 
             let cleanedText = responseText.trim(); if (cleanedText.startsWith("```json")) { cleanedText = cleanedText.substring(7); } if (cleanedText.endsWith("```")) { cleanedText = cleanedText.substring(0, cleanedText.length - 3); } cleanedText = cleanJsonResponse(cleanedText); 
             const responseJson = JSON.parse(cleanedText); 
             if (!responseJson.evaluation?.length || typeof responseJson.evaluation[0]?.rating !== 'number') { throw new Error("API returned invalid evaluation format."); } setEvaluationResults(responseJson.evaluation); switchSection('results'); 
-        } catch (error: any) { console.error("Error evaluating:", error); if (error instanceof SyntaxError) { showError(`Invalid AI evaluation response. Check console.`); } else { showError(`Failed to evaluate: ${error.message}.`); } } 
+                } catch (error: any) {
+                        console.error("Error evaluating:", error);
+                        if (error instanceof QuotaExceededError || error?.status === 429) {
+                            const fallbackEvaluation = evaluateFallbackAnswers(generatedQuestions, userAnswers);
+                            setEvaluationResults(fallbackEvaluation);
+                            switchSection('results');
+                            showError("API quota exceeded. Used offline answer evaluation.");
+                        } else if (error instanceof SyntaxError) {
+                            showError(`Invalid AI evaluation response. Check console.`);
+                        } else {
+                            showError(`Failed to evaluate: ${error.message}.`);
+                        }
+                } 
         finally { hideLoader(); }
     }
 

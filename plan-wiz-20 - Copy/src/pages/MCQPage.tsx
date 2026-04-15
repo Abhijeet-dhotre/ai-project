@@ -14,6 +14,16 @@ interface MCQ {
   correctAnswer: string;
 }
 
+class QuotaExceededError extends Error {
+  retryAfterSeconds?: number;
+
+  constructor(message: string, retryAfterSeconds?: number) {
+    super(message);
+    this.name = "QuotaExceededError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 type ScreenState = 'upload' | 'count' | 'loading' | 'quiz' | 'results';
 
 const MCQPage: React.FC = () => {
@@ -40,12 +50,89 @@ const MCQPage: React.FC = () => {
 
   // --- API Configuration ---
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-  const genModel = "gemini-2.5-flash-preview-05-20";
+  const genModel = "gemini-2.5-flash";
 
   useEffect(() => {
     // Reset state on load (was previously tied to planId)
     handleStartOver();
   }, []); // Runs once on mount
+
+  const buildFallbackMcqs = (source: string, count: number): MCQ[] => {
+    const text = source.replace(/\s+/g, ' ').trim();
+    if (!text) {
+      return [
+        {
+          question: "Which is the best study strategy for an unknown topic?",
+          options: [
+            "Read, summarize, and test yourself regularly",
+            "Memorize without understanding",
+            "Skip fundamentals and jump to advanced parts",
+            "Study only once before exam",
+          ],
+          correctAnswer: "Read, summarize, and test yourself regularly",
+        },
+      ];
+    }
+
+    const segments = text
+      .split(/[.!?]\s+/)
+      .map(s => s.trim())
+      .filter(s => s.length > 25);
+
+    const pool = Array.from(new Set(segments)).slice(0, Math.max(count, 8));
+
+    const normalizedTopic = text.length > 80 ? `${text.slice(0, 80)}...` : text;
+    const topicFallbackPool = [
+      `${normalizedTopic} is best understood by connecting it with core definitions and examples.`,
+      `A strong answer on ${normalizedTopic} includes terminology, process, and one use case.`,
+      `${normalizedTopic} should be revised with active recall and spaced repetition.`,
+      `Common mistakes in ${normalizedTopic} come from skipping foundational concepts.`,
+      `Comparing ${normalizedTopic} with related concepts improves retention and clarity.`,
+    ];
+
+    const effectivePool = pool.length > 0 ? pool : topicFallbackPool;
+
+    const genericDistractors = [
+      "Because it is always true in every context",
+      "It depends only on memorizing definitions",
+      "It is unrelated to the main topic",
+      "It is only important for advanced researchers",
+    ];
+
+    const cards: MCQ[] = [];
+    for (let i = 0; i < Math.min(count, effectivePool.length); i++) {
+      const fact = effectivePool[i];
+      const q = `Which statement best matches this key point: \"${fact.slice(0, 90)}${fact.length > 90 ? '...' : ''}\"?`;
+
+      const options = [
+        fact,
+        genericDistractors[i % genericDistractors.length],
+        genericDistractors[(i + 1) % genericDistractors.length],
+        genericDistractors[(i + 2) % genericDistractors.length],
+      ].sort(() => Math.random() - 0.5);
+
+      cards.push({
+        question: q,
+        options,
+        correctAnswer: fact,
+      });
+    }
+
+    if (cards.length === 0) {
+      cards.push({
+        question: `Which statement is most accurate about ${normalizedTopic}?`,
+        options: [
+          `${normalizedTopic} is learned better with concept understanding and practice`,
+          `${normalizedTopic} has no practical importance`,
+          `${normalizedTopic} should only be memorized as isolated facts`,
+          `${normalizedTopic} cannot be tested with MCQs`,
+        ],
+        correctAnswer: `${normalizedTopic} is learned better with concept understanding and practice`,
+      });
+    }
+
+    return cards;
+  };
 
 
   // --- Handlers ---
@@ -116,10 +203,6 @@ const MCQPage: React.FC = () => {
 
   const handleQuestionCountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!apiKey) {
-      setErrorMessage("API Key is missing. Please configure VITE_GEMINI_API_KEY in your .env file.");
-      return;
-    }
     if (numQuestions < 1 || numQuestions > 20) {
       setErrorMessage("Please enter a number between 1 and 20.");
       return;
@@ -168,7 +251,15 @@ Instructions:
         throw new Error("Internal error: No PDF text or topic available.");
       }
 
-      const generatedQuestions = await executeMCQGeneration(payload);
+      let generatedQuestions: MCQ[] | null = null;
+
+      if (apiKey) {
+        generatedQuestions = await executeMCQGeneration(payload);
+      } else {
+        const fallbackSource = extractedText || topic;
+        generatedQuestions = buildFallbackMcqs(fallbackSource, numQuestions);
+        setErrorMessage("API key not found. Generated offline MCQs instead.");
+      }
 
       if (generatedQuestions && generatedQuestions.length > 0) {
         const validQuestions = generatedQuestions.filter(q =>
@@ -196,6 +287,22 @@ Instructions:
       }
     } catch (err: any) {
       console.error("Error generating MCQs:", err);
+
+      const fallbackSource = extractedText || topic;
+      if (err instanceof QuotaExceededError || err?.status === 429) {
+        const fallback = buildFallbackMcqs(fallbackSource, numQuestions);
+        if (fallback.length > 0) {
+          setQuestions(fallback);
+          startQuiz();
+          setErrorMessage(
+            err instanceof QuotaExceededError && err.retryAfterSeconds
+              ? `API quota exceeded. Offline quiz generated. Try AI again in about ${err.retryAfterSeconds}s.`
+              : "API quota exceeded. Offline quiz generated."
+          );
+          return;
+        }
+      }
+
       setErrorMessage(`Error generating quiz: ${err.message}. Please check your input and API key/quota, then try again.`);
       setCurrentScreen(extractedText ? 'count' : 'upload');
     }
@@ -242,6 +349,22 @@ Instructions:
       if (!response.ok) {
         const errorBody = await response.text();
         console.error("API Error Response Body:", errorBody);
+        if (response.status === 429) {
+          let retryAfterSeconds: number | undefined;
+          try {
+            const parsed = JSON.parse(errorBody);
+            const retryDetail = parsed?.error?.details?.find(
+              (detail: any) => detail?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo"
+            );
+            const rawDelay = retryDetail?.retryDelay as string | undefined;
+            if (rawDelay) {
+              retryAfterSeconds = parseInt(rawDelay.replace("s", ""), 10);
+            }
+          } catch {
+            // Ignore parse issues and throw generic quota error.
+          }
+          throw new QuotaExceededError("Gemini API quota exceeded.", retryAfterSeconds);
+        }
         let detail = 'Unknown error';
         try {
           const errorJson = JSON.parse(errorBody);
@@ -398,7 +521,15 @@ Instructions:
     setErrorMessage(null);
 
     if (!apiKey) {
-      setErrorMessage("API Key is missing. Please configure VITE_GEMINI_API_KEY in your .env file.");
+      const fallbackSource = extractedText || topic;
+      const fallback = buildFallbackMcqs(fallbackSource, numQuestions);
+      if (fallback.length > 0) {
+        setQuestions(fallback);
+        startQuiz();
+        setErrorMessage("API key missing. Generated offline MCQs instead.");
+      } else {
+        setErrorMessage("API key missing and offline quiz generation failed.");
+      }
       setIsGeneratingMore(false);
       return;
     }
@@ -483,6 +614,18 @@ Instructions:
 
     } catch (err: any) {
       console.error("Error generating more MCQs:", err);
+
+      if (err instanceof QuotaExceededError || err?.status === 429) {
+        const fallbackSource = extractedText || topic;
+        const fallback = buildFallbackMcqs(fallbackSource, numQuestions);
+        if (fallback.length > 0) {
+          setQuestions(fallback);
+          startQuiz();
+          setErrorMessage("API quota exceeded. Generated offline MCQs instead.");
+          return;
+        }
+      }
+
       setErrorMessage(`Error generating new quiz: ${err.message}. Please try again.`);
       setCurrentScreen('results');
     } finally {

@@ -38,6 +38,16 @@ interface GeminiApiResponse {
     }>;
 }
 
+class QuotaExceededError extends Error {
+  retryAfterSeconds?: number;
+
+  constructor(message: string, retryAfterSeconds?: number) {
+    super(message);
+    this.name = "QuotaExceededError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 const FlashCardPage = () => {
   // const { planId } = useParams(); // Removed
   const navigate = useNavigate();
@@ -53,7 +63,7 @@ const FlashCardPage = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY || "";
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   useEffect(() => {
     loadFromLocalStorage();
@@ -92,6 +102,24 @@ const FlashCardPage = () => {
   const saveToLocalStorage = (cards: Flashcard[]) => {
     localStorage.setItem(getStorageKey(), JSON.stringify(cards));
   }
+
+  const generateFallbackFlashcards = (rawText: string): Flashcard[] => {
+    const compact = rawText.replace(/\s+/g, " ").trim();
+    if (!compact) return [];
+
+    const candidates = compact
+      .split(/[.!?]\s+/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 30);
+
+    const unique = Array.from(new Set(candidates));
+    const selected = unique.slice(0, 12);
+
+    return selected.map((line, idx) => ({
+      question: `Explain key point ${idx + 1}: ${line.slice(0, 90)}${line.length > 90 ? "..." : ""}`,
+      answer: line,
+    }));
+  };
 
   // ... (handleTextChange and handleFileUpload methods remain the same) ...
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -147,9 +175,9 @@ const FlashCardPage = () => {
     reader.readAsArrayBuffer(file);
   };
 
-   const callGeminiAPI = async (payload: any, retries = 3, delay = 1000): Promise<Flashcard[] | null> => {
+     const callGeminiAPI = async (payload: any, retries = 3, delay = 1000): Promise<Flashcard[] | null> => {
        if (!apiKey) {
-            throw new Error("API Key is missing. Please configure VITE_GEMINI_API_KEY in your .env file.");
+        throw new Error("API Key is missing. Please configure VITE_GEMINI_API_KEY in your .env file.");
        }
        for (let i = 0; i < retries; i++) {
         try {
@@ -163,6 +191,28 @@ const FlashCardPage = () => {
 
             if (!response.ok) {
                  console.error("API Error Response:", response.status, responseBodyText);
+
+                 if (response.status === 429) {
+                    let retryAfterSeconds: number | undefined;
+                    try {
+                      const parsed = JSON.parse(responseBodyText);
+                      const retryDetail = parsed?.error?.details?.find(
+                        (detail: any) => detail?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo"
+                      );
+                      const rawDelay = retryDetail?.retryDelay as string | undefined;
+                      if (rawDelay) {
+                        retryAfterSeconds = parseInt(rawDelay.replace("s", ""), 10);
+                      }
+                    } catch {
+                      // Ignore parsing errors and proceed with generic quota message.
+                    }
+
+                    throw new QuotaExceededError(
+                      "Gemini API quota exceeded.",
+                      Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined
+                    );
+                 }
+
                  throw new Error(`API error! Status: ${response.status}. ${responseBodyText.substring(0, 100)}`);
             }
 
@@ -207,6 +257,11 @@ const FlashCardPage = () => {
             }
         } catch (error: any) {
             console.error(`API Call Attempt ${i + 1} failed:`, error.message);
+
+            if (error instanceof QuotaExceededError) {
+              throw error;
+            }
+
             if (i === retries - 1) throw error;
              toast.warning(`API call failed (Attempt ${i + 1}). Retrying...`);
             await new Promise(res => setTimeout(res, delay * Math.pow(2, i)));
@@ -237,16 +292,11 @@ const FlashCardPage = () => {
       toast.error('Please enter text, paste notes, or upload a PDF.');
       return;
     }
-     if (!apiKey) {
-         toast.error("API Key not set. Please add VITE_GEMINI_API_KEY to your .env file.");
-         return;
-     }
-
     setIsLoading(true);
     setCurrentFlashcards([]);
     setCurrentIndex(0);
     setViewState('input');
-    toast.info('Generating your flashcards with AI... ✨');
+    toast.info('Generating your flashcards... ✨');
 
      const systemPrompt = "You are an expert learning assistant. Create high-quality flashcards (question/answer pairs) from the provided text. Focus on key concepts, definitions, and facts. Ensure questions are clear and answers are concise and accurate. Format the output strictly as a JSON object containing a single key 'flashcards', which is an array of objects, each with 'question' and 'answer' string properties.";
      const userQuery = `Generate flashcards for the following text:\n\n---\n${userInput}\n---`;
@@ -260,7 +310,18 @@ const FlashCardPage = () => {
     };
 
     try {
-      const flashcards = await callGeminiAPI(payload);
+      let flashcards: Flashcard[] | null = null;
+
+      if (apiKey) {
+        flashcards = await callGeminiAPI(payload);
+      } else {
+        toast.warning('API key missing. Using offline flashcard generation.');
+      }
+
+      if (!flashcards || flashcards.length === 0) {
+        flashcards = generateFallbackFlashcards(userInput);
+      }
+
       if (flashcards && flashcards.length > 0) {
         setCurrentFlashcards(flashcards);
         saveToLocalStorage(flashcards);
@@ -272,8 +333,26 @@ const FlashCardPage = () => {
       }
     } catch (error: any) {
       console.error("Flashcard generation failed:", error);
-      toast.error(`Error: ${error.message || 'Failed to generate flashcards.'}`);
-       setViewState('input');
+
+      if (error instanceof QuotaExceededError) {
+        const fallbackCards = generateFallbackFlashcards(userInput);
+        if (fallbackCards.length > 0) {
+          setCurrentFlashcards(fallbackCards);
+          saveToLocalStorage(fallbackCards);
+          setViewState('studying');
+          toast.warning(
+            error.retryAfterSeconds
+              ? `API quota exceeded. Generated offline flashcards instead. Try AI again in about ${error.retryAfterSeconds}s.`
+              : 'API quota exceeded. Generated offline flashcards instead.'
+          );
+        } else {
+          setViewState('input');
+          toast.error('API quota exceeded and offline generation could not create cards from this input.');
+        }
+      } else {
+        toast.error(`Error: ${error.message || 'Failed to generate flashcards.'}`);
+        setViewState('input');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -492,7 +571,7 @@ const FlashCardPage = () => {
                   <Button
                     id="generate-btn"
                     onClick={handleFlashcardGeneration}
-                    disabled={notesInput.trim().length === 0 || isLoading || isLoadingPdf || !apiKey}
+                    disabled={notesInput.trim().length === 0 || isLoading || isLoadingPdf}
                     className="mt-6 w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-transform transform hover:scale-[1.02] disabled:opacity-50 disabled:scale-100 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                    {isLoading ? (
@@ -502,7 +581,7 @@ const FlashCardPage = () => {
                    )}
                 </Button>
                 {!apiKey && (
-                     <p className="text-xs text-red-600 text-center mt-2 font-medium">Warning: VITE_GEMINI_API_KEY environment variable not set.</p>
+                   <p className="text-xs text-amber-700 text-center mt-2 font-medium">VITE_GEMINI_API_KEY not found. Offline flashcard generation will be used.</p>
                  )}
             </CardContent>
          </Card>

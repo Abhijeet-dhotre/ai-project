@@ -85,7 +85,7 @@ const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
 // ... (useGeminiApi hook remains the same) ...
 const useGeminiApi = () => {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY || ""; 
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+  const apiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   const callApi = useCallback(async (prompt: string, fileData: { mimeType: string; base64Data: string } | null = null) => {
     let parts: any[] = [];

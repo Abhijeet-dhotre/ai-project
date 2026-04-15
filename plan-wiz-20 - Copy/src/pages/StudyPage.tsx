@@ -8,13 +8,17 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 
+
+
 const StudyPage = () => {
   const { planId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
 
+
   // Determine if a sub-route is active
   const isSubRouteActive = location.pathname !== `/plan/${planId}/study`;
+
 
   const studyOptions = [
     {
@@ -24,20 +28,20 @@ const StudyPage = () => {
       path: "notes-maker",
       color: "from-yellow-500 to-yellow-600",
     },
-    {
-      title: "Theory Memorizer",
-      description: "Tools to memorize concepts",
-      icon: BrainCircuit,
-      path: "theory-memorizer",
-      color: "from-teal-500 to-teal-600",
-    },
-    {
-      title: "Image Generator",
-      description: "Visualize theories with AI",
-      icon: ImageIcon,
-      path: "image-generator",
-      color: "from-indigo-500 to-indigo-600",
-    },
+    // {
+    //   title: "Theory Memorizer",
+    //   description: "Tools to memorize concepts",
+    //   icon: BrainCircuit,
+    //   path: "theory-memorizer",
+    //   color: "from-teal-500 to-teal-600",
+    // },
+    // {
+    //   title: "Image Generator",
+    //   description: "Visualize theories with AI",
+    //   icon: ImageIcon,
+    //   path: "image-generator",
+    //   color: "from-indigo-500 to-indigo-600",
+    // },
     {
       title: "QnA Component",
       description: "Ask and answer questions about the plan",
@@ -57,6 +61,8 @@ const StudyPage = () => {
   ];
 
 
+
+
   return (
     // Match background from ImageGenerator for consistency
     <div className="min-h-screen bg-gradient-to-br from-background via-muted/10 to-background">
@@ -72,6 +78,7 @@ const StudyPage = () => {
           </Button>
         </div>
       </header>
+
 
       {/* Main Content - REMOVE container, mx-auto, max-w-*. ADD padding. */}
       <main className="w-full px-4 lg:px-8 py-8">
@@ -122,4 +129,6 @@ const StudyPage = () => {
   );
 };
 
+
 export default StudyPage;
+

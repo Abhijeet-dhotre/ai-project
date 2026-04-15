@@ -1,7 +1,9 @@
 import { useNavigate } from "react-router-dom";
 // Import MessageSquare for the new icon
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { BookOpen, Brain, FileText, ImageIcon, Lightbulb, MessageSquare, MessageSquareQuote, Target } from "lucide-react"; 
+import { Button } from "@/components/ui/button";
+import { BookOpen, Brain, FileText, ImageIcon, Lightbulb, MessageSquare, MessageSquareQuote, Target, LogOut } from "lucide-react";
+import { useAuth } from "../App"; 
 
 // AI Tool definitions
 const aiTools = [
@@ -19,13 +21,13 @@ const aiTools = [
     icon: MessageSquareQuote,
     colorClasses: "from-green-600 to-green-500",
   },
-  {
-    title: "Theory Memorizer",
-    description: "Tools to help you memorize key theories and facts.",
-    path: "/theory-memorizer",
-    icon: Brain,
-    colorClasses: "from-purple-600 to-purple-500",
-  },
+  // {
+  //   title: "Theory Memorizer",
+  //   description: "Tools to help you memorize key theories and facts.",
+  //   path: "/theory-memorizer",
+  //   icon: Brain,
+  //   colorClasses: "from-purple-600 to-purple-500",
+  // },
   {
     title: "FlashCards",
     description: "Create and study with interactive flashcards.",
@@ -47,13 +49,13 @@ const aiTools = [
     icon: Lightbulb,
     colorClasses: "from-yellow-500 to-yellow-600",
   },
-  {
-    title: "Image Generator",
-    description: "Create images to visualize complex concepts.",
-    path: "/image-generator",
-    icon: ImageIcon,
-    colorClasses: "from-pink-600 to-pink-500",
-  },
+  // {
+  //   title: "Image Generator",
+  //   description: "Create images to visualize complex concepts.",
+  //   path: "/image-generator",
+  //   icon: ImageIcon,
+  //   colorClasses: "from-pink-600 to-pink-500",
+  // },
   // ✨ NEW AI TUTOR CARD
   {
     title: "AI Tutor",
@@ -67,6 +69,12 @@ const aiTools = [
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-muted/20 to-background">
@@ -80,6 +88,23 @@ const Dashboard = () => {
             <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
               AI Study Planner
             </h1>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-muted-foreground">Hi, {user?.fullName || "User"}</span>
+            {user?.role === "admin" && (
+              <Button 
+                variant="default" 
+                size="sm" 
+                onClick={() => navigate("/admin")}
+                className="bg-purple-600 hover:bg-purple-700"
+              >
+                Admin Dashboard
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={handleLogout}>
+              <LogOut className="h-4 w-4 mr-2" />
+              Logout
+            </Button>
           </div>
         </div>
       </header>
